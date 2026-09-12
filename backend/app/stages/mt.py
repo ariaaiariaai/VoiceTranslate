@@ -103,10 +103,12 @@ class SakuraMT:
             "--chat-template", "chatml",
         ]
         log.info("mt.spawn", cmd=" ".join(cmd))
+        # IMPORTANT: don't inherit PIPE — llama-server logs a lot on startup and
+        # the pipe buffer (64KB) fills up, blocking the subprocess. DEVNULL is fine.
         self._proc = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             start_new_session=True,  # so we can SIGTERM the whole group
         )
         # Wait for /health

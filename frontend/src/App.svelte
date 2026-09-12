@@ -198,9 +198,14 @@
     height: 100vh;
     height: 100dvh;
     position: relative;
+    /* iPhone notch / Dynamic Island safe-area */
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
   }
   header {
-    padding: 1rem 1rem 0.5rem;
+    padding: 0.75rem 1rem 0.5rem;
     text-align: center;
   }
   h1 {
@@ -215,7 +220,7 @@
     color: rgba(255, 255, 255, 0.5);
   }
   .footer {
-    padding: 0.75rem 1rem 1.5rem;
+    padding: 0.75rem 1rem 1rem;
     background: rgba(0, 0, 0, 0.4);
     border-top: 1px solid rgba(255, 255, 255, 0.06);
   }
