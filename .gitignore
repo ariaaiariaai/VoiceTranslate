@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+dist/
+.svelte-kit/
+.vite/
+*.log
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build artifacts
+build/
+*.egg-info/
+*.wheel
+
+# Logs
+logs/
+*.log
+
+# Cloudflare tunnel credentials (NEVER commit)
+.cloudflared/
+*tunnel-credentials.json
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Model files (large, not in repo)
+models/
+*.gguf
+*.bin
+*.safetensors
+
+# Test artifacts
+tests/fixtures/*.wav
+!tests/fixtures/.gitkeep
+
+# OS
+Thumbs.db

@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "voicetranslate-frontend",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["dev", "--host"],
+      "port": 5173
+    },
+    {
+      "name": "voicetranslate-backend",
+      "runtimeExecutable": "uvicorn",
+      "runtimeArgs": ["app.main:app", "--host", "0.0.0.0", "--port", "8000", "--loop", "uvloop"],
+      "port": 8000
+    }
+  ]
+}
