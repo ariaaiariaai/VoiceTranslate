@@ -8,6 +8,7 @@ export interface TranscriptLine {
   latency_ms: number
   timestamp: number
   partial?: boolean
+  quality_score?: number | null
 }
 
 export type ConnectionState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error'

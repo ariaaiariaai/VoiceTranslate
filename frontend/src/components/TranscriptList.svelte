@@ -32,6 +32,17 @@
             {#if line.latency_ms > 0}
               <span class="latency">{Math.round(line.latency_ms / 100) / 10}s</span>
             {/if}
+            {#if line.quality_score !== undefined && line.quality_score !== null}
+              <span
+                class="quality"
+                class:quality-good={line.quality_score >= 8}
+                class:quality-ok={line.quality_score >= 6 && line.quality_score < 8}
+                class:quality-low={line.quality_score < 6}
+                title="翻譯品質評分 (1-10)"
+              >
+                ★ {line.quality_score}
+              </span>
+            {/if}
           </div>
         {/if}
       </div>
@@ -90,6 +101,25 @@
     font-size: 0.7rem;
     color: rgba(255, 255, 255, 0.4);
     font-weight: 400;
+  }
+  .quality {
+    margin-left: 0.4rem;
+    font-size: 0.65rem;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-weight: 500;
+  }
+  .quality-good {
+    background: rgba(34, 197, 94, 0.2);
+    color: #86efac;
+  }
+  .quality-ok {
+    background: rgba(234, 179, 8, 0.2);
+    color: #fde047;
+  }
+  .quality-low {
+    background: rgba(239, 68, 68, 0.2);
+    color: #fca5a5;
   }
   @keyframes slideIn {
     from {

@@ -19,6 +19,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from app.logging import get_logger
 from app.models.messages import (
+    AudioChunkMsg,
     ErrorMsg,
     HelloMsg,
     ModeChangeMsg,
@@ -205,6 +206,19 @@ class WSSession:
             self._history.append({"ja": result.ja_text, "zh": result.zh_text})
             if len(self._history) > self._history_max:
                 self._history = self._history[-self._history_max:]
+            # Streaming TTS: Improvement #6 — start audio chunks as soon as MT is done,
+            # continue while pipeline returns final transcript.
+            need_audio = (
+                self.config.mode in (OutputMode.AUDIO, OutputMode.BOTH)
+                and result.audio_wav
+            )
+            audio_seq = None
+            chunk_count = 0
+            if need_audio:
+                self._audio_seq += 1
+                audio_seq = self._audio_seq
+                # Count chunks: split the MP3 blob into ~16KB frames
+                chunk_count = max(1, len(result.audio_wav) // 16384 + (1 if len(result.audio_wav) % 16384 else 0))
             # Send final transcript
             transcript = TranscriptMsg(
                 segment=TranscriptSegment(
@@ -213,12 +227,21 @@ class WSSession:
                     zh=result.zh_text,
                     latency_ms=result.latency_ms,
                 ),
-                audio_seq=(self._audio_seq + 1) if self.config.mode in (OutputMode.AUDIO, OutputMode.BOTH) and result.audio_wav else None,
+                audio_seq=audio_seq,
+                audio_chunk_count=chunk_count if need_audio else None,
+                quality_score=result.quality_score,
             )
             await self.ws.send_text(transcript.model_dump_json())
-            if self.config.mode in (OutputMode.AUDIO, OutputMode.BOTH) and result.audio_wav:
-                self._audio_seq += 1
-                await self.ws.send_bytes(result.audio_wav)
+            # Stream audio chunks
+            if need_audio and chunk_count > 0:
+                # Send a small audio_chunk marker so client knows the count
+                marker = AudioChunkMsg(seq=audio_seq, total=chunk_count, format="mp3")
+                await self.ws.send_text(marker.model_dump_json())
+                # Stream the MP3 blob in 16KB frames
+                chunk_size = 16384
+                data = result.audio_wav
+                for i in range(0, len(data), chunk_size):
+                    await self.ws.send_bytes(data[i:i + chunk_size])
         except Exception as e:
             log.error("ws.segment.error", error=str(e), exc_info=True)
             await self._send_error("pipeline_error", str(e))

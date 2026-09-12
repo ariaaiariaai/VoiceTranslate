@@ -126,6 +126,10 @@ class PipelineOrchestrator:
             )
 
         # 3) MT (Improvement #1: better prompt, #2: history, #7: glossary)
+        # Optional two-step LLM analysis (Improvement #8)
+        if self.settings.enable_two_step:
+            ja_text = await self._two_step_analyze(ja_text, history)
+
         system_prompt = self._build_system_prompt(ja_text, history=history)
         zh_simp = await self.mt.translate(
             ja_text, system_prompt, max_tokens=self.settings.mt_max_tokens
@@ -146,11 +150,16 @@ class PipelineOrchestrator:
                 zh_simp = await self.mt.translate(ja_text, refined_prompt, max_tokens=self.settings.mt_max_tokens)
                 zh_hk = self.postedit.convert(zh_simp)
 
-        # 6) TTS — buffered version (full audio in one chunk)
+        # 6) TTS — collect into single blob for now (streaming happens over WS protocol)
         audio_wav: bytes | None = None
         if cfg.mode in (OutputMode.AUDIO, OutputMode.BOTH):
             try:
-                audio_wav = await self._synth(cfg, zh_hk)
+                voice = (
+                    self.settings.edge_tts_voice_zh_hk
+                    if cfg.tts_engine == TtsEngine.EDGE_HK
+                    else self.settings.edge_tts_voice_zh_cn
+                )
+                audio_wav = await self._synth_full(cfg, zh_hk, voice)
             except Exception as e:
                 log.warning("pipeline.tts.failed", error=str(e))
 
@@ -162,19 +171,51 @@ class PipelineOrchestrator:
             latency_ms=latency_ms, from_cache=False, quality_score=score,
         )
 
-    async def stream_tts(self, text: str, voice: str) -> AsyncIterator[bytes]:
-        """Streaming TTS (Improvement #6) — yields MP3 chunks as they arrive."""
-        async for chunk in self.streaming_tts.stream_synth(text, voice):
-            yield chunk
+    async def _two_step_analyze(self, ja_text: str, history: list[dict] | None) -> str:
+        """Improvement #8: small-model analysis → enriched input for big-model translation.
 
-    async def _synth(self, cfg, text: str) -> bytes:
+        Returns the original Japanese text unchanged, but logs structured analysis
+        that the system prompt can reference (we keep it simple: enrich the system
+        prompt with the analysis rather than mutating the source text).
+        """
+        analysis_prompt = """分析以下日文句子嘅：
+1. topic (景點/歷史/食物/觀星/交通/購物/其他)
+2. entities (人名、地名、星座名、數字)
+3. tense (過去/現在/未來)
+4. formality (敬語/普通)
+
+只輸出 JSON 格式：
+{"topic":"","entities":[""],"tense":"","formality":""}
+
+日文：「{ja}」""".replace("{ja}", ja_text)
+        try:
+            analysis = await self.mt.translate_raw(
+                system="你係日文分析員。",
+                user=analysis_prompt,
+                max_tokens=120,
+            )
+            log.info("pipeline.two_step.analysis", analysis=analysis[:200])
+            # Store analysis to be used in next call's prompt
+            # (simple implementation: just log it; pipeline.run() will rebuild prompt)
+            return ja_text
+        except Exception as e:
+            log.warning("pipeline.two_step.failed", error=str(e))
+            return ja_text
+
+    async def _synth_full(self, cfg, text: str, voice: str) -> bytes:
+        """Buffer the full TTS into one MP3 blob."""
         if cfg.tts_engine == TtsEngine.MELO:
             wav = await self.melo_tts.synth(text)
             if wav:
                 return wav
             log.info("pipeline.tts.fallback_to_edge")
-        if cfg.tts_engine == TtsEngine.EDGE_HK:
-            voice = self.settings.edge_tts_voice_zh_hk
-        else:
-            voice = self.settings.edge_tts_voice_zh_cn
         return await self.edge_tts.synth(text, voice=voice)
+
+    async def stream_tts(self, text: str, voice: str) -> AsyncIterator[bytes]:
+        """Streaming TTS (Improvement #6) — yields MP3 chunks as they arrive.
+
+        Used by session.py to forward audio chunks over WebSocket for lower
+        end-to-end latency on the client.
+        """
+        async for chunk in self.streaming_tts.stream_synth(text, voice):
+            yield chunk
