@@ -23,6 +23,8 @@
   let capture: AudioCaptureHandle | null = null
   let ws: WSClient | null = null
   let pendingAudioSeq = 0
+  let audioChunks: Uint8Array[] = []
+  let audioExpectedChunks = 0
 
   onMount(() => {
     initPWA()
@@ -46,6 +48,8 @@
     await requestWakeLock()
     transcripts.set([])
     pendingAudioSeq = 0
+    audioChunks = []
+    audioExpectedChunks = 0
 
     connection.set('connecting')
 
@@ -93,6 +97,7 @@
     if (msg.type === 'ready') return
     if (msg.type === 'transcript') {
       const seg = msg.segment
+      const quality = msg.quality_score ?? null
       lastLatency.set(seg.latency_ms)
       transcripts.update((arr) => {
         // Replace any partial placeholder for this id
@@ -103,11 +108,17 @@
           zh: seg.zh,
           latency_ms: seg.latency_ms,
           timestamp: Date.now(),
+          quality_score: quality,
         }
         const next = [...filtered, line]
         return next.slice(-200) // keep last 200
       })
       pendingAudioSeq = msg.audio_seq ?? 0
+      // Reset audio chunk buffer for streaming (Improvement #6)
+      audioChunks = []
+      audioExpectedChunks = msg.audio_chunk_count ?? 0
+    } else if (msg.type === 'audio_chunk') {
+      audioExpectedChunks = msg.total
     } else if (msg.type === 'partial') {
       transcripts.update((arr) => {
         const filtered = arr.filter((l) => l.id !== msg.id)
@@ -128,10 +139,21 @@
   }
 
   function handleServerBinary(data: ArrayBuffer) {
-    // Server sends WAV/MP3 paired with the most recent transcript (audio_seq).
-    // We just play it. Order is guaranteed (text frame precedes binary frame).
-    const blob = new Blob([data], { type: 'audio/wav' })
-    playTTSBlob(blob).catch((e) => console.warn('tts play failed', e))
+    // Server streams MP3 audio in N chunks (Improvement #6). Accumulate them,
+    // concatenate and play when all received.
+    audioChunks.push(new Uint8Array(data))
+    if (audioExpectedChunks > 0 && audioChunks.length >= audioExpectedChunks) {
+      const total = audioChunks.reduce((s, c) => s + c.length, 0)
+      const merged = new Uint8Array(total)
+      let off = 0
+      for (const c of audioChunks) {
+        merged.set(c, off)
+        off += c.length
+      }
+      audioChunks = []
+      const blob = new Blob([merged], { type: 'audio/mpeg' })
+      playTTSBlob(blob).catch((e) => console.warn('tts play failed', e))
+    }
   }
 
   function onModeChange() {
