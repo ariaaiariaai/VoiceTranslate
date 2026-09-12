@@ -156,8 +156,12 @@ class Settings(BaseSettings):
     edge_tts_voice_zh_cn: str = "zh-CN-XiaoxiaoNeural"
 
     # --- Quality check (Improvement #9) ---
-    enable_quality_check: bool = True  # ON by default — defends against hallucinations
+    # Disabled by default — adds ~15s latency per segment (extra LLM call).
+    # Anti-hallucination prompt (Improvement #1) is the primary defense.
+    # Enable via VOICETRANSLATE_ENABLE_QUALITY_CHECK=true env var if needed.
+    enable_quality_check: bool = False
     quality_retry_threshold: int = 7  # 1-10; below this triggers re-translation
+    quality_only_if_suspicious: bool = True  # only check when output > 1.4× input length
 
     # --- Translation features ---
     enable_history: bool = True  # Improvement #2: include last 3 segments as context

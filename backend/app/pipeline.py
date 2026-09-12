@@ -138,17 +138,23 @@ class PipelineOrchestrator:
         # 4) Post-edit → zh-HK
         zh_hk = self.postedit.convert(zh_simp)
 
-        # 5) Quality self-check (Improvement #9)
+        # 5) Quality self-check (Improvement #9) — opt-in, adds latency
         score = None
         if self.settings.enable_quality_check:
-            score_obj = await self.quality_scorer.score(ja_text, zh_hk)
-            score = score_obj.overall
-            if not score_obj.acceptable:
-                log.info("pipeline.quality.retry",
-                         ja=ja_text[:40], score=score, issues=score_obj.issues)
-                refined_prompt = system_prompt + f"\n\n[Refinement needed: {', '.join(score_obj.issues)}. Please re-translate more carefully.]"
-                zh_simp = await self.mt.translate(ja_text, refined_prompt, max_tokens=self.settings.mt_max_tokens)
-                zh_hk = self.postedit.convert(zh_simp)
+            # Optionally skip check for short translations (low hallucination risk)
+            skip_check = (
+                self.settings.quality_only_if_suspicious
+                and len(zh_hk) <= int(len(ja_text) * 1.4) + 5
+            )
+            if not skip_check:
+                score_obj = await self.quality_scorer.score(ja_text, zh_hk)
+                score = score_obj.overall
+                if not score_obj.acceptable:
+                    log.info("pipeline.quality.retry",
+                             ja=ja_text[:40], score=score, issues=score_obj.issues)
+                    refined_prompt = system_prompt + f"\n\n[Refinement needed: {', '.join(score_obj.issues)}. Please re-translate more carefully, preserving exactly what the speaker said.]"
+                    zh_simp = await self.mt.translate(ja_text, refined_prompt, max_tokens=self.settings.mt_max_tokens)
+                    zh_hk = self.postedit.convert(zh_simp)
 
         # 6) TTS — collect into single blob for now (streaming happens over WS protocol)
         audio_wav: bytes | None = None
