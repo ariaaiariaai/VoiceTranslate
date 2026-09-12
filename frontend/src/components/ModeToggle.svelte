@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { mode, ttsEngine } from '../lib/stores'
+  import { mode } from '../lib/stores'
 
   let { onChange } = $props<{ onChange?: () => void }>()
 </script>
@@ -31,26 +31,6 @@
       >兩者</button>
     </div>
   </div>
-
-  <div class="group">
-    <span class="label">語音</span>
-    <div class="seg">
-      <button
-        class:active={$ttsEngine === 'edge_hk'}
-        onclick={() => {
-          ttsEngine.set('edge_hk')
-          onChange?.()
-        }}
-      >廣東話</button>
-      <button
-        class:active={$ttsEngine === 'edge_cn'}
-        onclick={() => {
-          ttsEngine.set('edge_cn')
-          onChange?.()
-        }}
-      >普通話</button>
-    </div>
-  </div>
 </div>
 
 <style>
@@ -61,7 +41,6 @@
     background: rgba(255, 255, 255, 0.03);
     border-top: 1px solid rgba(255, 255, 255, 0.06);
     align-items: center;
-    flex-wrap: wrap;
     justify-content: center;
   }
   .group {

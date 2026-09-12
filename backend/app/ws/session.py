@@ -46,14 +46,25 @@ class SessionConfig:
 
 @dataclass
 class VadAccumulator:
-    """Tracks speech state and emits end-of-speech transitions."""
+    """Tracks speech state and emits end-of-speech transitions.
 
-    min_silence_ms: int = 700
-    min_speech_ms: int = 250
+    Speaker rotation: when a long silence (>1.5s) is seen, we increment the
+    speaker letter. Each segment is tagged with the current speaker.
+    This is a heuristic — not real speaker diarization. Real identity
+    ("guide vs tourist") needs speaker embeddings; this just rotates labels.
+    """
+
+    min_silence_ms: int = 500  # tighter: commit earlier (was 700)
+    min_speech_ms: int = 200
     is_speaking: bool = False
     speech_started_at_ms: int = 0
     last_speech_at_ms: int = 0
+    last_speaker_change_at_ms: int = 0
     accumulated: bytearray = field(default_factory=bytearray)
+    # Speaker rotation state
+    current_speaker: int = 0  # 0=A, 1=B, 2=C, 3=D, then back to 0
+    speaker_letters: list[str] = field(default_factory=lambda: ["A", "B", "C", "D"])
+    speaker_switch_silence_ms: int = 1500  # gap before switching speaker label
 
     def feed(self, pcm: bytes, vad_speech_prob: float, ts_ms: int) -> bool:
         """Returns True when an end-of-speech has been detected and audio is ready."""
@@ -72,6 +83,11 @@ class VadAccumulator:
             self.accumulated.extend(pcm)
             silence_ms = ts_ms - self.last_speech_at_ms
             if silence_ms >= self.min_silence_ms:
+                # Decide if we should switch speaker label for the *next* segment
+                if silence_ms >= self.speaker_switch_silence_ms and (ts_ms - self.last_speaker_change_at_ms) >= self.speaker_switch_silence_ms:
+                    self.current_speaker = (self.current_speaker + 1) % len(self.speaker_letters)
+                    self.last_speaker_change_at_ms = ts_ms
+                    log.info("vad.speaker_switch", speaker=self.speaker_letters[self.current_speaker], silence_ms=int(silence_ms))
                 self.is_speaking = False
                 return True
         return False
@@ -80,6 +96,10 @@ class VadAccumulator:
         out = bytes(self.accumulated)
         self.accumulated.clear()
         return out
+
+    @property
+    def speaker_label(self) -> str:
+        return self.speaker_letters[self.current_speaker]
 
 
 class WSSession:
@@ -191,10 +211,11 @@ class WSSession:
     async def _process_segment(self, pcm_segment: bytes) -> None:
         self._segment_id += 1
         seg_id = self._segment_id
+        speaker = self.vad.speaker_label
         try:
             # Send a partial placeholder so the UI shows activity
             await self.ws.send_text(
-                PartialTranscriptMsg(id=seg_id, ja="…", zh="…").model_dump_json()
+                PartialTranscriptMsg(id=seg_id, ja="…", zh="…", speaker=speaker).model_dump_json()
             )
             # Pass conversation history (Improvement #2)
             result = await self.pipeline.run(
@@ -217,15 +238,15 @@ class WSSession:
             if need_audio:
                 self._audio_seq += 1
                 audio_seq = self._audio_seq
-                # Count chunks: split the MP3 blob into ~16KB frames
                 chunk_count = max(1, len(result.audio_wav) // 16384 + (1 if len(result.audio_wav) % 16384 else 0))
-            # Send final transcript
+            # Send final transcript (with speaker tag)
             transcript = TranscriptMsg(
                 segment=TranscriptSegment(
                     id=seg_id,
                     ja=result.ja_text,
                     zh=result.zh_text,
                     latency_ms=result.latency_ms,
+                    speaker=speaker,
                 ),
                 audio_seq=audio_seq,
                 audio_chunk_count=chunk_count if need_audio else None,
@@ -234,10 +255,8 @@ class WSSession:
             await self.ws.send_text(transcript.model_dump_json())
             # Stream audio chunks
             if need_audio and chunk_count > 0:
-                # Send a small audio_chunk marker so client knows the count
                 marker = AudioChunkMsg(seq=audio_seq, total=chunk_count, format="mp3")
                 await self.ws.send_text(marker.model_dump_json())
-                # Stream the MP3 blob in 16KB frames
                 chunk_size = 16384
                 data = result.audio_wav
                 for i in range(0, len(data), chunk_size):

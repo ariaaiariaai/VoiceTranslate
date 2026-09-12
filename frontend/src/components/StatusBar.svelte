@@ -1,5 +1,6 @@
 <script lang="ts">
   import { connection, lastLatency } from '../lib/stores'
+  import versionInfo from '../version.json'
 
   function computeLabel(conn: string, lat: number): string {
     switch (conn) {
@@ -21,23 +22,33 @@
   let label = $derived(computeLabel($connection, $lastLatency))
 </script>
 
-<div class="status" class:connected={$connection === 'connected'} class:error={$connection === 'error'}>
-  <span class="dot"></span>
-  <span class="text">{label}</span>
+<div class="status-row">
+  <div class="status" class:connected={$connection === 'connected'} class:error={$connection === 'error'}>
+    <span class="dot"></span>
+    <span class="text">{label}</span>
+  </div>
+  <span class="version" title="Frontend + Backend commit">
+    v{versionInfo.version} · {versionInfo.git_sha}
+  </span>
 </div>
 
 <style>
+  .status-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.4rem 0.75rem;
+    font-size: 0.75rem;
+  }
   .status {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    padding: 0.5rem 1rem;
-    font-size: 0.8rem;
+    gap: 0.4rem;
     color: rgba(255, 255, 255, 0.6);
   }
   .dot {
-    width: 8px;
-    height: 8px;
+    width: 7px;
+    height: 7px;
     border-radius: 50%;
     background: rgba(255, 255, 255, 0.3);
   }
@@ -47,5 +58,10 @@
   }
   .status.error .dot {
     background: #ef4444;
+  }
+  .version {
+    color: rgba(255, 255, 255, 0.35);
+    font-family: ui-monospace, 'SF Mono', monospace;
+    font-size: 0.65rem;
   }
 </style>

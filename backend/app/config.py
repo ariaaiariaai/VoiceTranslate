@@ -50,9 +50,15 @@ class Settings(BaseSettings):
     chunk_ms: int = 1000  # client sends 1 s chunks
 
     # --- VAD ---
-    vad_min_silence_ms: int = 700  # trigger end-of-speech
-    vad_min_speech_ms: int = 250
+    vad_min_silence_ms: int = 500  # tighter: commit end-of-speech faster
+    vad_min_speech_ms: int = 200
     vad_threshold: float = 0.5
+    vad_speaker_switch_silence_ms: int = 1500  # gap that triggers speaker label rotation
+
+    # --- Streaming partials ---
+    enable_streaming_partials: bool = True
+    partial_interval_ms: int = 700
+    partial_min_audio_ms: int = 1200
 
     # --- Translation ---
     # Full system prompt is built dynamically in pipeline.py from system_prompt_base

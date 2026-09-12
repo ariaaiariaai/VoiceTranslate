@@ -23,6 +23,12 @@
   {:else}
     {#each $transcripts as line (line.id)}
       <div class="line" class:partial={line.partial}>
+        {#if line.speaker}
+          <div class="speaker-tag" data-speaker={line.speaker}>
+            <span class="speaker-letter">{line.speaker}</span>
+            <span class="speaker-label">講者</span>
+          </div>
+        {/if}
         {#if line.ja}
           <div class="ja">{line.ja}</div>
         {/if}
@@ -79,6 +85,35 @@
     border-radius: 12px;
     padding: 0.75rem 1rem;
     animation: slideIn 0.25s ease-out;
+  }
+  .speaker-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    margin-bottom: 0.35rem;
+    font-size: 0.65rem;
+    color: rgba(255, 255, 255, 0.55);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .speaker-letter {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: rgba(124, 58, 237, 0.4);
+    color: white;
+    font-weight: 700;
+    font-size: 0.7rem;
+  }
+  .speaker-tag[data-speaker="B"] .speaker-letter { background: rgba(34, 197, 94, 0.4); }
+  .speaker-tag[data-speaker="C"] .speaker-letter { background: rgba(234, 179, 8, 0.4); }
+  .speaker-tag[data-speaker="D"] .speaker-letter { background: rgba(239, 68, 68, 0.4); }
+  .speaker-label {
+    font-size: 0.65rem;
+    color: rgba(255, 255, 255, 0.4);
   }
   .line.partial {
     opacity: 0.5;

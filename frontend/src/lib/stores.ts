@@ -9,6 +9,7 @@ export interface TranscriptLine {
   timestamp: number
   partial?: boolean
   quality_score?: number | null
+  speaker?: string | null  // "A", "B", "C" — VAD-based speaker rotation
 }
 
 export type ConnectionState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error'
