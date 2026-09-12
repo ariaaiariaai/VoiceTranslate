@@ -65,6 +65,8 @@ class VadAccumulator:
     current_speaker: int = 0  # 0=A, 1=B, 2=C, 3=D, then back to 0
     speaker_letters: list[str] = field(default_factory=lambda: ["A", "B", "C", "D"])
     speaker_switch_silence_ms: int = 1500  # gap before switching speaker label
+    # Pre-allocated segment id for this utterance (so partials and final share same id)
+    pending_segment_id: int = 0
 
     def feed(self, pcm: bytes, vad_speech_prob: float, ts_ms: int) -> bool:
         """Returns True when an end-of-speech has been detected and audio is ready."""
@@ -97,6 +99,12 @@ class VadAccumulator:
         self.accumulated.clear()
         return out
 
+    def start_utterance(self) -> None:
+        """Call when VAD detects start of speech — resets per-utterance state."""
+        self.accumulated.clear()
+        self.is_speaking = False
+        self.speech_started_at_ms = self.last_speech_at_ms
+
     @property
     def speaker_label(self) -> str:
         return self.speaker_letters[self.current_speaker]
@@ -117,6 +125,10 @@ class WSSession:
         # Conversation history for translation context (Improvement #2)
         self._history: list[dict] = []  # [{ja: "...", zh: "..."}, ...]
         self._history_max = 5  # keep last N segments
+        # Streaming partials (Improvement #4)
+        self._partial_task: asyncio.Task | None = None
+        self._last_partial_text = ""  # avoid spamming identical partials
+        self._partial_seq = 0
 
     async def handle(self) -> None:
         await self.ws.accept()
@@ -125,6 +137,9 @@ class WSSession:
             # Wait for hello with timeout
             await asyncio.wait_for(self._wait_hello(), timeout=10.0)
             await self.ws.send_text(ReadyMsg().model_dump_json())
+            # Start streaming partials loop (Improvement #4)
+            if self.pipeline.settings.enable_streaming_partials:
+                self._partial_task = asyncio.create_task(self._partial_loop())
             await self._pump()
         except asyncio.TimeoutError:
             await self._send_error("hello_timeout", "client did not send hello within 10s")
@@ -138,6 +153,58 @@ class WSSession:
                 pass
         finally:
             self._closed = True
+            if self._partial_task and not self._partial_task.done():
+                self._partial_task.cancel()
+                try:
+                    await self._partial_task
+                except asyncio.CancelledError:
+                    pass
+
+    async def _partial_loop(self) -> None:
+        """Periodically run partial STT + MT on accumulated audio while speaking.
+
+        Sends `partial` messages so the UI can update translations live as the
+        speaker continues. On VAD end-of-speech, the main loop sends the final.
+        """
+        interval_s = self.pipeline.settings.partial_interval_ms / 1000.0
+        min_audio_s = self.pipeline.settings.partial_min_audio_ms / 1000.0
+        try:
+            while not self._closed:
+                await asyncio.sleep(interval_s)
+                if not self.vad.is_speaking:
+                    continue
+                audio_so_far = bytes(self.vad.accumulated)
+                audio_s = len(audio_so_far) / 2 / 16000
+                if audio_s < min_audio_s:
+                    continue
+                # Run a quick partial STT (just the accumulated audio so far)
+                try:
+                    partial_ja = await self.pipeline.stt.transcribe(
+                        audio_so_far, sample_rate=16000, language="ja"
+                    )
+                except Exception as e:
+                    log.warning("partial.stt.failed", error=str(e))
+                    continue
+                if not partial_ja or partial_ja == self._last_partial_text:
+                    continue
+                self._last_partial_text = partial_ja
+                # Use the pre-allocated segment id from VAD. If 0, no active utterance — skip.
+                seg_id = self.vad.pending_segment_id
+                if seg_id == 0:
+                    continue
+                self._partial_seq += 1
+                speaker = self.vad.speaker_label
+                cached_zh = self.pipeline.phrase_cache.lookup(partial_ja)
+                zh_partial = cached_zh or ""
+                await self.ws.send_text(
+                    PartialTranscriptMsg(
+                        id=seg_id, ja=partial_ja, zh=zh_partial or "…", speaker=speaker
+                    ).model_dump_json()
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("partial_loop.error", error=str(e))
 
     async def _wait_hello(self) -> None:
         while True:
@@ -196,27 +263,44 @@ class WSSession:
     async def _on_audio(self, pcm_bytes: bytes) -> None:
         """Receive one PCM chunk (1 s @ 16 kHz ≈ 32 KB) and run VAD."""
         prob = _rms_speech_prob(pcm_bytes)
-        # Each byte is 1/2 a sample, at 16 kHz → samples_per_ms = 16
         chunk_ms = len(pcm_bytes) // 2 // 16
         self._cumulative_ms += chunk_ms
         ts_ms = self._cumulative_ms
 
+        was_speaking = self.vad.is_speaking
         end_of_speech = self.vad.feed(pcm_bytes, prob, ts_ms)
+
+        # Pre-allocate segment ID at speech start so partials and final share same id
+        if self.vad.is_speaking and not was_speaking and self.vad.pending_segment_id == 0:
+            self._segment_id += 1
+            self.vad.pending_segment_id = self._segment_id
+            # Send "…" partial immediately
+            speaker = self.vad.speaker_label
+            await self.ws.send_text(
+                PartialTranscriptMsg(id=self._segment_id, ja="…", zh="…", speaker=speaker).model_dump_json()
+            )
+            self._last_partial_text = ""
+
         if end_of_speech:
             audio_segment = self.vad.drain()
             if len(audio_segment) < 1024:  # < 32 ms — discard
+                self.vad.pending_segment_id = 0
                 return
-            await self._process_segment(audio_segment)
+            # Use the pre-allocated segment id
+            seg_id_for_pipeline = self.vad.pending_segment_id
+            self.vad.pending_segment_id = 0  # reset for next utterance
+            await self._process_segment(audio_segment, seg_id_for_pipeline)
 
-    async def _process_segment(self, pcm_segment: bytes) -> None:
-        self._segment_id += 1
-        seg_id = self._segment_id
+    async def _process_segment(self, pcm_segment: bytes, seg_id: int | None = None) -> None:
+        if seg_id is None:
+            self._segment_id += 1
+            seg_id = self._segment_id
+        self._last_partial_text = ""
         speaker = self.vad.speaker_label
         try:
-            # Send a partial placeholder so the UI shows activity
-            await self.ws.send_text(
-                PartialTranscriptMsg(id=seg_id, ja="…", zh="…", speaker=speaker).model_dump_json()
-            )
+            # NOTE: pre-allocation in _on_audio() already sent a "…" partial with
+            # this same seg_id. We don't send another placeholder here — frontend
+            # would see a redundant update.
             # Pass conversation history (Improvement #2)
             result = await self.pipeline.run(
                 pcm_segment, self.config, history=list(self._history)
@@ -227,8 +311,6 @@ class WSSession:
             self._history.append({"ja": result.ja_text, "zh": result.zh_text})
             if len(self._history) > self._history_max:
                 self._history = self._history[-self._history_max:]
-            # Streaming TTS: Improvement #6 — start audio chunks as soon as MT is done,
-            # continue while pipeline returns final transcript.
             need_audio = (
                 self.config.mode in (OutputMode.AUDIO, OutputMode.BOTH)
                 and result.audio_wav
@@ -239,7 +321,6 @@ class WSSession:
                 self._audio_seq += 1
                 audio_seq = self._audio_seq
                 chunk_count = max(1, len(result.audio_wav) // 16384 + (1 if len(result.audio_wav) % 16384 else 0))
-            # Send final transcript (with speaker tag)
             transcript = TranscriptMsg(
                 segment=TranscriptSegment(
                     id=seg_id,
@@ -253,7 +334,6 @@ class WSSession:
                 quality_score=result.quality_score,
             )
             await self.ws.send_text(transcript.model_dump_json())
-            # Stream audio chunks
             if need_audio and chunk_count > 0:
                 marker = AudioChunkMsg(seq=audio_seq, total=chunk_count, format="mp3")
                 await self.ws.send_text(marker.model_dump_json())
