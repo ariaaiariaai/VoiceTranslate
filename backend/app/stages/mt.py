@@ -43,7 +43,7 @@ class SakuraMT:
         self._idle_unload_s = idle_unload_s
         self._n_gpu_layers = n_gpu_layers
         self._proc: subprocess.Popen | None = None
-        self._last_used: float = 0.0
+        self._last_used: float = time.monotonic()  # start the idle clock NOW
         self._watcher_task: asyncio.Task | None = None
         self._http = httpx.AsyncClient(base_url=f"http://{host}:{port}", timeout=60.0)
 
