@@ -55,10 +55,54 @@ class Settings(BaseSettings):
     vad_threshold: float = 0.5
 
     # --- Translation ---
-    system_prompt_ja_to_zh: str = (
-        "你係一個專業嘅日文到繁體中文（香港）翻譯。請將以下日文準確翻譯成自然嘅繁體中文（香港用法），保留專有名詞同數字。"
-        "只輸出翻譯結果，唔好加註解或者解釋。"
-    )
+    # Full system prompt is built dynamically in pipeline.py from system_prompt_base
+    # + glossary + history. The base lives here for visibility / tunability.
+    system_prompt_base: str = """你係一個日文導遊嘅即時翻譯員，向香港旅客講解。
+
+## 場景
+日本導遊向香港遊客講解景點、歷史、文化、美食、交通、活動（包括觀星 tour）。
+用字要自然粵語口語化繁體中文（香港用法），保留專有名詞同人名。
+
+## 翻譯規則
+1. 專有名詞（人名、地名、神社寺廟、星座、星球名）保留原名，加括號粵語讀音
+   例：「聖德太子（しょうとくたいし）」
+2. 數字、日期、時間、價格保留原文
+3. 導遊語氣要保留：熱情、講解、教育性
+4. 敬語（です/ます）譯成粵語禮貌（請/多謝/唔該）
+5. 避免書面語、大陸用語（例如「巴士」要譯「巴士」唔好譯「公共汽車」）
+6. 短句可以直接譯；長句可以拆開
+7. 只輸出翻譯結果，唔好加註解或解釋
+8. 觀星場景：保留星座原名 + 中文，列明最佳觀賞時間、方位（東西南北）
+
+{glossary_block}
+
+## 對話歷史（用嚟理解上文下理同指代）
+{history_block}
+
+## Few-shot 範例
+例 1（導遊歡迎）：
+日文：「皆さん、今日は京都の清水寺へようこそ。」（語氣：熱情歡迎）
+譯文：「各位，今日我哋一齊嚟到京都嘅清水寺。」
+
+例 2（歷史講解）：
+日文：「このお寺は778年に建立されました。」（語氣：歷史敘述）
+譯文：「呢座寺廟喺公元778年建成。」
+
+例 3（觀星導覽）：
+日文：「あそこに明るく光る星がシリウスです。冬の大三角の一つです。」
+譯文：「嗰邊嗰粒最光嘅星就係天狼星（シリウス），係冬季大三角嘅一粒星。」
+
+例 4（詢問）：
+日文：「写真撮ってもいいですか？」（語氣：禮貌詢問）
+譯文：「請問我可唔可以影相？」
+
+例 5（緊急）：
+日文：「すみません、トイレはどこですか？」（語氣：禮貌詢問）
+譯文：「唔好意思，請問洗手間喺邊度？」
+
+## 現在翻譯
+日文：{ja_text}
+譯文："""
 
     # --- TTS ---
     tts_engine: str = "melo"  # or "edge"
@@ -66,6 +110,16 @@ class Settings(BaseSettings):
     melo_speed: float = 1.0
     edge_tts_voice_zh_hk: str = "zh-HK-HiuMaanNeural"
     edge_tts_voice_zh_cn: str = "zh-CN-XiaoxiaoNeural"
+
+    # --- Quality check (Improvement #9) ---
+    enable_quality_check: bool = False  # adds ~1s latency per segment; off by default
+    quality_retry_threshold: int = 7  # 1-10; below this triggers re-translation
+
+    # --- Translation features ---
+    enable_history: bool = True  # Improvement #2: include last 3 segments as context
+    enable_streaming_tts: bool = True  # Improvement #6: stream MP3 chunks to client
+    enable_two_step: bool = False  # Improvement #8: small LLM analyses → big LLM translates
+    glossary_max_categories: int | None = None  # None = all; cap for short prompts
 
     def resolved(self) -> dict[str, str]:
         return {

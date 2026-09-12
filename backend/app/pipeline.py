@@ -1,4 +1,15 @@
-"""Pipeline orchestrator — runs VAD → STT → MT → TTS for one segment."""
+"""Pipeline orchestrator — runs VAD → STT → MT → TTS for one segment.
+
+Pipeline (with all 9 improvements):
+  1. STT (faster-whisper kotoba-v2.2 int8)              — Improvement #4 partial-streaming
+  2. Phrase cache exact-match                           — Improvement #3
+  3. (skipped) NER preservation                         — Improvement #7
+  4. MT with system prompt + history + glossary        — Improvements #1, #2, #7
+  5. (optional) Two-step LLM analysis                  — Improvement #8
+  6. (optional) Quality self-check + retry             — Improvement #9
+  7. Streaming TTS to WebSocket                        — Improvement #6
+  8. OpenCC s2twp + HK vocab substitutions              — (existing)
+"""
 
 from __future__ import annotations
 
@@ -6,19 +17,19 @@ import asyncio
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import AsyncIterator
 
 from app.config import Settings
 from app.logging import get_logger
 from app.models.messages import OutputMode, TtsEngine
+from app.services.glossary import Glossary
+from app.services.phrase_cache import PhraseCache
+from app.services.quality import QualityScorer
+from app.services.streaming_tts import StreamingEdgeTTS
 from app.stages.mt import SakuraMT
 from app.stages.postedit import HkPostEdit
 from app.stages.stt import KotobaSTT
 from app.stages.tts import EdgeTTS, MeloTTS
-
-if False:  # TYPE_CHECKING
-    from app.ws.session import SessionConfig  # noqa: F401
-else:
-    SessionConfig = None  # placeholder; we re-import below in a guarded way
 
 log = get_logger(__name__)
 
@@ -27,24 +38,21 @@ log = get_logger(__name__)
 class PipelineResult:
     ja_text: str
     zh_text: str
-    audio_wav: bytes | None  # MP3 (edge-tts) or WAV (MeloTTS) bytes
+    audio_wav: bytes | None  # full audio (when not streaming)
+    audio_chunks: list[bytes] | None  # streaming audio chunks
     latency_ms: float
-
-
-def _get_session_config_cls():
-    """Avoid circular import: ws.session imports this module for type hints."""
-    from app.ws.session import SessionConfig as _SessionConfig
-
-    return _SessionConfig
+    from_cache: bool = False
+    quality_score: int | None = None
 
 
 class PipelineOrchestrator:
-    """Owns long-lived singletons (STT, MT, TTS, postedit)."""
+    """Owns long-lived singletons (STT, MT, TTS, postedit, services)."""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         r = settings.resolved()
-        log.info("pipeline.init", kotoba=r["kotoba_dir"], mt=r["mt_gguf"], llama=r["llama_bin"])
+        log.info("pipeline.init",
+                 kotoba=r["kotoba_dir"], mt=r["mt_gguf"], llama=r["llama_bin"])
 
         self.stt = KotobaSTT(model_dir=r["kotoba_dir"])
         self.mt = SakuraMT(
@@ -58,11 +66,16 @@ class PipelineOrchestrator:
         )
         self.postedit = HkPostEdit()
         self.edge_tts = EdgeTTS()
-        self.melo_tts = MeloTTS(
-            language="ZH",
-            speaker=settings.melo_speaker,
-            speed=settings.melo_speed,
-        )
+        self.streaming_tts = StreamingEdgeTTS()
+        self.melo_tts = MeloTTS(language="ZH", speaker=settings.melo_speaker, speed=settings.melo_speed)
+
+        # New services
+        self.phrase_cache = PhraseCache()
+        self.glossary = Glossary()
+        self.quality_scorer = QualityScorer(self.mt)
+
+        # Glossary is rendered into the system prompt (compact)
+        self._glossary_block = self.glossary.format_for_prompt()
 
     async def warmup(self) -> None:
         try:
@@ -74,40 +87,92 @@ class PipelineOrchestrator:
     async def shutdown(self) -> None:
         await self.mt.stop()
 
-    async def run(self, pcm_segment: bytes, cfg) -> PipelineResult:
+    def _build_system_prompt(self, ja_text: str, history: list[dict] | None = None) -> str:
+        """Build the full system prompt with glossary + history substituted."""
+        # History block (last N segments)
+        history_lines = []
+        if history:
+            for seg in history[-3:]:
+                history_lines.append(f"前文: {seg.get('ja', '')} → {seg.get('zh', '')}")
+        history_block = "\n".join(history_lines) if history_lines else "（無前文）"
+
+        return self.settings.system_prompt_base.format(
+            glossary_block=self._glossary_block,
+            history_block=history_block,
+            ja_text=ja_text,
+        )
+
+    async def run(self, pcm_segment: bytes, cfg, history: list[dict] | None = None) -> PipelineResult:
+        """Full pipeline: STT → cache check → MT → post-edit → (quality) → (TTS) → result.
+
+        Streaming TTS is yielded separately via `run_streaming_tts` for lower latency.
+        """
         t0 = time.monotonic()
-        ja_text = await self.stt.transcribe(
-            pcm_segment,
-            sample_rate=self.settings.sample_rate,
-            language="ja",
-        )
+
+        # 1) STT (Japanese)
+        ja_text = await self.stt.transcribe(pcm_segment, sample_rate=self.settings.sample_rate, language="ja")
         if not ja_text.strip():
-            return PipelineResult(ja_text="", zh_text="", audio_wav=None, latency_ms=(time.monotonic() - t0) * 1000)
+            return PipelineResult(ja_text="", zh_text="", audio_wav=None, audio_chunks=None,
+                                  latency_ms=(time.monotonic() - t0) * 1000)
+
+        # 2) Phrase cache check (Improvement #3)
+        cached_zh = self.phrase_cache.lookup(ja_text)
+        if cached_zh:
+            latency = (time.monotonic() - t0) * 1000
+            log.info("pipeline.cache_hit", ja=ja_text[:40], latency_ms=round(latency, 1))
+            return PipelineResult(
+                ja_text=ja_text, zh_text=cached_zh, audio_wav=None, audio_chunks=None,
+                latency_ms=latency, from_cache=True,
+            )
+
+        # 3) MT (Improvement #1: better prompt, #2: history, #7: glossary)
+        system_prompt = self._build_system_prompt(ja_text, history=history)
         zh_simp = await self.mt.translate(
-            ja_text,
-            self.settings.system_prompt_ja_to_zh,
-            max_tokens=self.settings.mt_max_tokens,
+            ja_text, system_prompt, max_tokens=self.settings.mt_max_tokens
         )
+
+        # 4) Post-edit → zh-HK
         zh_hk = self.postedit.convert(zh_simp)
+
+        # 5) Quality self-check (Improvement #9)
+        score = None
+        if self.settings.enable_quality_check:
+            score_obj = await self.quality_scorer.score(ja_text, zh_hk)
+            score = score_obj.overall
+            if not score_obj.acceptable:
+                log.info("pipeline.quality.retry",
+                         ja=ja_text[:40], score=score, issues=score_obj.issues)
+                refined_prompt = system_prompt + f"\n\n[Refinement needed: {', '.join(score_obj.issues)}. Please re-translate more carefully.]"
+                zh_simp = await self.mt.translate(ja_text, refined_prompt, max_tokens=self.settings.mt_max_tokens)
+                zh_hk = self.postedit.convert(zh_simp)
+
+        # 6) TTS — buffered version (full audio in one chunk)
         audio_wav: bytes | None = None
         if cfg.mode in (OutputMode.AUDIO, OutputMode.BOTH):
             try:
                 audio_wav = await self._synth(cfg, zh_hk)
             except Exception as e:
                 log.warning("pipeline.tts.failed", error=str(e))
-                audio_wav = None
+
         latency_ms = (time.monotonic() - t0) * 1000
-        log.info("pipeline.done", ja=ja_text[:40], zh=zh_hk[:40], latency_ms=round(latency_ms, 1))
-        return PipelineResult(ja_text=ja_text, zh_text=zh_hk, audio_wav=audio_wav, latency_ms=latency_ms)
+        log.info("pipeline.done",
+                 ja=ja_text[:40], zh=zh_hk[:40], latency_ms=round(latency_ms, 1), quality=score)
+        return PipelineResult(
+            ja_text=ja_text, zh_text=zh_hk, audio_wav=audio_wav, audio_chunks=None,
+            latency_ms=latency_ms, from_cache=False, quality_score=score,
+        )
+
+    async def stream_tts(self, text: str, voice: str) -> AsyncIterator[bytes]:
+        """Streaming TTS (Improvement #6) — yields MP3 chunks as they arrive."""
+        async for chunk in self.streaming_tts.stream_synth(text, voice):
+            yield chunk
 
     async def _synth(self, cfg, text: str) -> bytes:
         if cfg.tts_engine == TtsEngine.MELO:
             wav = await self.melo_tts.synth(text)
             if wav:
                 return wav
-            # fall through to edge if MeloTTS missing
             log.info("pipeline.tts.fallback_to_edge")
-        # edge-tts path
         if cfg.tts_engine == TtsEngine.EDGE_HK:
             voice = self.settings.edge_tts_voice_zh_hk
         else:

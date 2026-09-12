@@ -164,11 +164,28 @@ class SakuraMT:
             return ""
         await self._ensure_loaded()
         self._touch()
+        return await self._chat_completion(system_prompt, text_ja, max_tokens)
+
+    async def translate_raw(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int = 200,
+    ) -> str:
+        """Low-level: send a single system+user prompt and return the response.
+
+        Used by QualityScorer and any other LLM-as-judge tooling.
+        """
+        await self._ensure_loaded()
+        self._touch()
+        return await self._chat_completion(system, user, max_tokens)
+
+    async def _chat_completion(self, system: str, user: str, max_tokens: int) -> str:
         payload = {
             "model": "sakura",
             "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": text_ja},
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
             ],
             "max_tokens": max_tokens,
             "temperature": 0.3,
@@ -180,9 +197,9 @@ class SakuraMT:
             r = await self._http.post("/v1/chat/completions", json=payload, timeout=60.0)
             r.raise_for_status()
             data = r.json()
-            zh = data["choices"][0]["message"]["content"].strip()
-            log.info("mt.translated", ja_len=len(text_ja), zh_len=len(zh))
-            return zh
+            content = data["choices"][0]["message"]["content"].strip()
+            log.info("mt.completed", system_chars=len(system), user_chars=len(user), response_chars=len(content))
+            return content
         except Exception as e:
             log.error("mt.error", error=str(e))
             raise

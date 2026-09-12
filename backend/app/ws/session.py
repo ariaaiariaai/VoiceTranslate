@@ -93,6 +93,9 @@ class WSSession:
         self._audio_seq = 0
         self._closed = False
         self._cumulative_ms = 0  # running total of audio ms seen
+        # Conversation history for translation context (Improvement #2)
+        self._history: list[dict] = []  # [{ja: "...", zh: "..."}, ...]
+        self._history_max = 5  # keep last N segments
 
     async def handle(self) -> None:
         await self.ws.accept()
@@ -192,9 +195,16 @@ class WSSession:
             await self.ws.send_text(
                 PartialTranscriptMsg(id=seg_id, ja="…", zh="…").model_dump_json()
             )
-            result = await self.pipeline.run(pcm_segment, self.config)
+            # Pass conversation history (Improvement #2)
+            result = await self.pipeline.run(
+                pcm_segment, self.config, history=list(self._history)
+            )
             if not result.ja_text:
                 return
+            # Update history
+            self._history.append({"ja": result.ja_text, "zh": result.zh_text})
+            if len(self._history) > self._history_max:
+                self._history = self._history[-self._history_max:]
             # Send final transcript
             transcript = TranscriptMsg(
                 segment=TranscriptSegment(
